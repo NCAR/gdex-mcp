@@ -1,5 +1,6 @@
 """GDEX MCP server — exposes GDEX dataset tools via the Model Context Protocol."""
 
+import asyncio
 import json
 import os
 
@@ -21,16 +22,64 @@ def _json(data) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+async def _safe(coro):
+    """Await a client call, turning an error into an inline result instead of raising."""
+    try:
+        return await coro
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Dataset discovery
 # ---------------------------------------------------------------------------
 
+_dataset_catalog: list[dict] | None = None
+_dataset_catalog_lock = asyncio.Lock()
+
+
+async def _get_dataset_catalog() -> list[dict]:
+    """Return the full dataset catalog, fetched once per server process and cached.
+
+    The catalog rarely changes within a session, and `list_datasets` may be
+    called repeatedly with different queries — refetching and re-parsing all
+    ~1700 entries every time would be wasteful.
+    """
+    global _dataset_catalog
+    if _dataset_catalog is None:
+        async with _dataset_catalog_lock:
+            if _dataset_catalog is None:
+                data = await client.list_datasets()
+                _dataset_catalog = data["datasets"]
+    return _dataset_catalog
+
 
 @mcp.tool()
-async def list_datasets() -> str:
-    """List all datasets available on GDEX with their IDs and titles."""
-    data = await client.list_datasets()
-    return _json(data)
+async def list_datasets(query: str = "", limit: int = 50, offset: int = 0) -> str:
+    """List datasets available on GDEX, with their IDs and titles.
+
+    The full catalog has ~1700 datasets — far too many to return at once.
+    Always pass `query` to filter by keyword unless the user specifically
+    wants to browse the whole catalog page by page.
+
+    Args:
+        query: Keyword(s) to filter by, matched case-insensitively as a substring
+               against dataset id and title. Leave empty to browse unfiltered.
+        limit: Max number of datasets to return (default 50, capped at 500)
+        offset: Number of matching datasets to skip, for paging through results
+    """
+    datasets = await _get_dataset_catalog()
+    if query:
+        q = query.lower()
+        datasets = [
+            d
+            for d in datasets
+            if q in d.get("id", "").lower() or q in (d.get("title") or "").lower()
+        ]
+    total = len(datasets)
+    limit = min(limit, 500)
+    page = datasets[offset : offset + limit]
+    return _json({"total_matches": total, "returned": len(page), "offset": offset, "datasets": page})
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +206,39 @@ async def get_dataset_documentation(dsid: str) -> str:
     """
     data = await client.get_documentation(dsid)
     return _json(data)
+
+
+@mcp.tool()
+async def describe_dataset(dsid: str) -> str:
+    """Return a combined overview of a dataset — abstract, temporal coverage,
+    spatial coverage, variables, data formats, and volume — in a single call.
+
+    Prefer this over calling the individual get_dataset_* metadata tools one
+    by one when the user wants a general summary of a dataset. If one of the
+    underlying fields fails to load, it's returned as {"error": ...} rather
+    than failing the whole call.
+
+    Args:
+        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+    """
+    abstract, temporal, spatial, variables, data_formats, volume = await asyncio.gather(
+        _safe(client.get_abstract(dsid)),
+        _safe(client.get_temporal(dsid)),
+        _safe(client.get_spatial_coverage(dsid)),
+        _safe(client.get_variables(dsid)),
+        _safe(client.get_data_formats(dsid)),
+        _safe(client.get_volume(dsid)),
+    )
+    return _json(
+        {
+            "abstract": abstract,
+            "temporal": temporal,
+            "spatial": spatial,
+            "variables": variables,
+            "data_formats": data_formats,
+            "volume": volume,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -352,13 +434,65 @@ async def get_control_file_template(dsid: str) -> str:
     return _json(data)
 
 
+def _parse_control_template(template_text: str) -> list[str]:
+    """Extract field names (e.g. "dataset", "date", "param") from a GDEX
+    control-file template's `key=value` lines, skipping blanks and comments."""
+    fields = []
+    for line in template_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key:
+            fields.append(key)
+    return fields
+
+
+@mcp.tool()
+async def validate_subset_request(dsid: str, request_json: str) -> str:
+    """Check a subset request body against the dataset's control file template,
+    without submitting anything. Use this before submit_subset_request to catch
+    missing or unrecognized fields fast, instead of finding out from a failed
+    API call.
+
+    Args:
+        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        request_json: JSON string of the subsetting request body to validate
+    """
+    try:
+        body = json.loads(request_json)
+    except json.JSONDecodeError as e:
+        return _json({"valid": False, "errors": [f"Invalid JSON: {e}"], "warnings": []})
+    if not isinstance(body, dict):
+        return _json({"valid": False, "errors": ["Request body must be a JSON object"], "warnings": []})
+
+    template = await client.get_control_file_template(dsid)
+    expected_fields = _parse_control_template(template.get("template", ""))
+
+    missing = [f for f in expected_fields if f not in body and f != "groupindex"]
+    unknown = [k for k in body if k not in expected_fields]
+
+    errors = [f"Missing expected field: {f}" for f in missing]
+    warnings = [f"Field not present in this dataset's template: {k}" for k in unknown]
+
+    return _json(
+        {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "expected_fields": expected_fields,
+        }
+    )
+
+
 @mcp.tool()
 async def submit_subset_request(request_json: str) -> str:
     """Submit a data subset request to GDEX. Requires GDEX_TOKEN.
 
     Args:
         request_json: JSON string of the subsetting request body. Use get_control_file_template
-                      to get the expected structure for a dataset.
+                      to get the expected structure for a dataset, or validate_subset_request
+                      to check it before submitting.
     """
     try:
         body = json.loads(request_json)
