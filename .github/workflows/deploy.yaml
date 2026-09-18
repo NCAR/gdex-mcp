@@ -1,0 +1,63 @@
+name: Deploy GDEX MCP Container
+#
+# Mirrors gdex-web-services' deploy workflow (the closer analog to this repo
+# than gdex-web-portal's Docker-Hub-based one): Harbor registry, PR-closed
+# trigger, github-actions[bot] commit identity, run-id image tags.
+#
+# Requires repo secrets RILEY_HARBOR_USERNAME, RILEY_HARBOR_PASSWORD, and
+# ACTIONS_PUSH_KEY — set these on this repo before enabling the workflow.
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+    paths-ignore:
+      - ".github/**"
+      - ".gitignore"
+      - "app-chart/**"
+      - "README.md"
+      - "LICENSE"
+  workflow_dispatch:
+    inputs:
+      run_reason:
+        description: 'Provide a reason or comment for this workflow'
+        required: false
+        type: string
+        default: 'No comment provided'
+
+jobs:
+  container-rebuild:
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to Harbor
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+          registry: hub.k8s.ucar.edu/gdex_mcp
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          ssh-key: ${{ secrets.ACTIONS_PUSH_KEY }}
+      - name: Build new container image
+        run: >
+          docker build --platform linux/amd64
+          -t hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:v${{ github.run_id }}
+          --no-cache -f Dockerfile .
+      - name: Push image to Harbor
+        run: |
+          docker push hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:v${{ github.run_id }}
+          docker tag hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:v${{ github.run_id }} hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:latest
+          docker push hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:latest
+      - name: Update Helm chart image tag
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          sed -E "/image/s/gdex-mcp:(.){1,}/gdex-mcp:v${{ github.run_id }}/" app-chart/values.yaml > app-chart/values.yaml.new
+          mv app-chart/values.yaml.new app-chart/values.yaml
+          git add app-chart/values.yaml
+          git commit -m "update image to v${{ github.run_id }}"
+          git push

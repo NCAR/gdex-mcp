@@ -1,6 +1,7 @@
 """GDEX MCP server — exposes GDEX dataset tools via the Model Context Protocol."""
 
 import asyncio
+import contextvars
 import json
 import os
 import time
@@ -18,6 +19,30 @@ mcp = FastMCP("gdex")
 _base_url = os.environ.get("GDEX_BASE_URL", "https://gdex.ucar.edu")
 _token = os.environ.get("GDEX_TOKEN") or None
 client = GDEXClient(_base_url, _token)
+
+# Per-request bearer token for the streamable-http transport (see main() and
+# _BearerTokenMiddleware below). Unset under the default stdio transport,
+# where a single process serves a single local user and the module-level
+# `client` above (built from the GDEX_TOKEN env var) is what every tool uses.
+_request_token: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "gdex_request_token", default=None
+)
+
+
+def _authed_client() -> GDEXClient:
+    """Build the GDEXClient for a call that requires GDEX_TOKEN.
+
+    Under streamable-http, each caller supplies their own GDEX token via the
+    Authorization header (extracted per-request by _BearerTokenMiddleware
+    into _request_token) so concurrent callers act as themselves rather than
+    sharing one identity. That takes precedence when present; otherwise this
+    falls back to the process-wide GDEX_TOKEN env var, which is the only
+    identity available under stdio. GDEXClient is cheap to construct — it
+    just holds a base URL and token, opening an httpx.AsyncClient per call
+    (see client.py) — so building one per request here is free.
+    """
+    token = _request_token.get() or _token
+    return GDEXClient(_base_url, token)
 
 
 def _json(data) -> str:
@@ -849,7 +874,7 @@ async def get_staff(dsid: str = "") -> str:
 @mcp.tool()
 async def list_request_statuses() -> str:
     """List all subsetting request statuses for the authenticated user. Requires GDEX_TOKEN."""
-    data = await client.list_request_statuses()
+    data = await _safe(_authed_client().list_request_statuses())
     return _json(data)
 
 
@@ -860,7 +885,7 @@ async def check_request_status(rindex: str) -> str:
     Args:
         rindex: Request index/ID
     """
-    data = await client.check_request_status(rindex)
+    data = await _safe(_authed_client().check_request_status(rindex))
     return _json(data)
 
 
@@ -871,7 +896,7 @@ async def get_request_files(rindex: str) -> str:
     Args:
         rindex: Request index/ID
     """
-    data = await client.get_request_files(rindex)
+    data = await _safe(_authed_client().get_request_files(rindex))
     return _json(data)
 
 
@@ -950,7 +975,7 @@ async def submit_subset_request(request_json: str) -> str:
         body = json.loads(request_json)
     except json.JSONDecodeError as e:
         return f"Invalid JSON: {e}"
-    data = await client.submit_subset_request(body)
+    data = await _safe(_authed_client().submit_subset_request(body))
     return _json(data)
 
 
@@ -1017,8 +1042,9 @@ async def submit_and_wait_for_request(
     except json.JSONDecodeError as e:
         return _json({"outcome": "error", "error": f"Invalid JSON: {e}"})
 
+    gdex = _authed_client()
     try:
-        submit_response = await client.submit_subset_request(body)
+        submit_response = await gdex.submit_subset_request(body)
     except GDEXError as e:
         return _json({"outcome": "error", "error": str(e), "error_type": type(e).__name__})
 
@@ -1040,7 +1066,7 @@ async def submit_and_wait_for_request(
     status_response: dict = {}
     while True:
         try:
-            status_response = await client.check_request_status(rindex)
+            status_response = await gdex.check_request_status(rindex)
         except GDEXAuthError as e:
             # Auth doesn't recover mid-poll — stop instead of retrying for timeout_s.
             return _json({"outcome": "error", "rindex": rindex, "error": str(e), "error_type": "GDEXAuthError"})
@@ -1053,7 +1079,7 @@ async def submit_and_wait_for_request(
         if outcome in ("ok", "failed"):
             result = {"outcome": outcome, "rindex": rindex, "status": status_response}
             if outcome == "ok":
-                result["files"] = await _safe(client.get_request_files(rindex))
+                result["files"] = await _safe(gdex.get_request_files(rindex))
             return _json(result)
 
         if time.monotonic() >= deadline:
@@ -1076,7 +1102,7 @@ async def purge_request(rindex: str) -> str:
     Args:
         rindex: Request index/ID to purge
     """
-    data = await client.purge_request(rindex)
+    data = await _safe(_authed_client().purge_request(rindex))
     return _json(data)
 
 
@@ -1133,10 +1159,81 @@ def prepare_subset_request(dsid: str, goal: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+#
+# Two ways to run this server, chosen via GDEX_MCP_TRANSPORT:
+#
+# - "stdio" (default): a local subprocess launched by one person's MCP client
+#   (Claude Desktop/Code config). One process, one user — the module-level
+#   `client` built from that user's own GDEX_TOKEN env var is all any tool
+#   ever needs, so _authed_client() just falls back to it.
+# - "streamable-http": a shared, network-reachable instance serving many
+#   concurrent callers. Each caller supplies their own GDEX token as an
+#   `Authorization: Token <token>` (or `Bearer <token>`) header on every MCP
+#   request — the same header shape GDEXClient itself sends upstream (see
+#   client.py's _headers()). _BearerTokenMiddleware below extracts it per
+#   request into _request_token, which _authed_client() prefers over the env
+#   var, so the six subsetting-request tools act as the caller, not as one
+#   shared identity. The public/read-only tools need no token either way and
+#   are unaffected.
+#
+# This intentionally skips the mcp SDK's built-in `auth=`/TokenVerifier
+# machinery (mcp.server.auth): that framework models a real OAuth
+# authorization server (issuer_url, protected-resource metadata, scopes) and
+# — because FastMCP wires it in as an all-or-nothing gate on the whole
+# transport — would force every tool, including the public ones, behind an
+# OAuth login GDEX doesn't have. GDEX's own auth is a static per-user token
+# (DRF TokenAuthentication), not OAuth; the middleware below just relays that
+# token as-is and lets GDEX's API be the actual authority — an invalid or
+# missing token surfaces as GDEXAuthError from the upstream call, the same
+# error path a bad GDEX_TOKEN produces under stdio today.
+
+
+class _BearerTokenMiddleware:
+    """ASGI middleware: extracts the Authorization header of each
+    streamable-http request into _request_token for the duration of that
+    request. Pure passthrough for every non-"http" scope (lifespan,
+    websocket) so it doesn't interfere with the session manager startup
+    FastMCP wires into the app's lifespan."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        token = None
+        for name, value in scope.get("headers", ()):
+            if name == b"authorization":
+                raw = value.decode("latin-1")
+                token = raw.split(" ", 1)[1].strip() if " " in raw else raw.strip()
+                break
+        reset_token = _request_token.set(token)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _request_token.reset(reset_token)
 
 
 def main():
-    mcp.run()
+    transport = os.environ.get("GDEX_MCP_TRANSPORT", "stdio")
+    if transport == "streamable-http":
+        import anyio
+        import uvicorn
+
+        mcp.settings.host = os.environ.get("GDEX_MCP_HOST", "0.0.0.0")
+        mcp.settings.port = int(os.environ.get("GDEX_MCP_PORT", "8000"))
+        app = _BearerTokenMiddleware(mcp.streamable_http_app())
+
+        async def _serve():
+            config = uvicorn.Config(app, host=mcp.settings.host, port=mcp.settings.port)
+            await uvicorn.Server(config).serve()
+
+        anyio.run(_serve)
+    elif transport == "stdio":
+        mcp.run()
+    else:
+        raise ValueError(f"Unknown GDEX_MCP_TRANSPORT: {transport!r} (expected 'stdio' or 'streamable-http')")
 
 
 if __name__ == "__main__":
