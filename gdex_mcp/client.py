@@ -36,6 +36,37 @@ class GDEXValidationError(GDEXError):
 _AUTH_HINTS = ("token", "auth", "unauthorized", "permission", "forbidden", "credential")
 _NOT_FOUND_HINTS = ("not found", "does not exist", "no such", "unknown dataset", "unknown request")
 
+# Plain Zarr-store ARCO URLs come back pointing at data.gdex.ucar.edu, which
+# is only reachable from NCAR's own network. Routing through the OSDF
+# director instead makes them readable from anywhere — the same reason
+# kerchunk reference variants get a "-osdf" name (see server.py's ARCO
+# section), except here there's no separate variant to pick: every "zarr"-
+# type ARCO row gets its host rewritten in place.
+_ARCO_ZARR_HOST = "https://data.gdex.ucar.edu"
+_ARCO_ZARR_OSDF_HOST = "https://osdf-director.osg-htc.org/ncar/gdex"
+
+
+def _to_osdf_zarr_url(url: str) -> str:
+    if url.startswith(_ARCO_ZARR_HOST):
+        return _ARCO_ZARR_OSDF_HOST + url[len(_ARCO_ZARR_HOST):]
+    return url
+
+
+def _rewrite_arco_zarr_urls(rows: object) -> object:
+    """Rewrite the URL (index 0) of every "zarr"-type (index 2) row in an
+    ARCO variables listing to go through the OSDF director. `reference`-type
+    (kerchunk) rows are left untouched — callers pick the "-osdf" variant
+    themselves per the existing convention. Passes through unchanged if the
+    response isn't the expected list-of-rows shape (e.g. an error dict)."""
+    if not isinstance(rows, list):
+        return rows
+    rewritten = []
+    for row in rows:
+        if isinstance(row, list) and len(row) > 2 and row[2] == "zarr" and row[0]:
+            row = [_to_osdf_zarr_url(row[0]), *row[1:]]
+        rewritten.append(row)
+    return rewritten
+
 
 def _classify_message(message: str) -> type[GDEXError]:
     m = message.lower()
@@ -297,10 +328,12 @@ class GDEXClient:
         return await self._get(f"/api/has_arco/{dsid}/")
 
     async def get_arco_variables(self, dsid: str) -> dict:
-        return await self._get(f"/api/arco_vars/{dsid}/")
+        data = await self._get(f"/api/arco_vars/{dsid}/")
+        return _rewrite_arco_zarr_urls(data)
 
     async def search_arco_variables(self, dsid: str, query: str) -> dict:
-        return await self._get(f"/api/search_arco_vars/{dsid}/{query}")
+        data = await self._get(f"/api/search_arco_vars/{dsid}/{query}")
+        return _rewrite_arco_zarr_urls(data)
 
     # --- Metrics ---
 

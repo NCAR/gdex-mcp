@@ -21,7 +21,10 @@ client = GDEXClient(_base_url, _token)
 
 
 def _json(data) -> str:
-    return json.dumps(data, indent=2, default=str)
+    # Compact separators (no pretty-print indent) — the model reading this
+    # doesn't need human-formatted whitespace, and indentation on nested
+    # responses can roughly double the token count for no benefit.
+    return json.dumps(data, default=str, separators=(",", ":"))
 
 
 async def _safe(coro):
@@ -102,119 +105,53 @@ async def get_dataset_metadata(dsid: str) -> str:
     """Return full metadata for a GDEX dataset (parameters, temporal range, spatial coverage, etc.).
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
     """
     data = await client.get_metadata(dsid)
     return _json(data)
 
 
-@mcp.tool()
-async def get_dataset_abstract(dsid: str) -> str:
-    """Return the abstract / description text for a dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_abstract(dsid)
-    return _json(data)
-
-
-@mcp.tool()
-async def get_dataset_variables(dsid: str) -> str:
-    """Return the list of scientific variables contained in a dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_variables(dsid)
-    return _json(data)
-
-
-@mcp.tool()
-async def get_dataset_temporal(dsid: str) -> str:
-    """Return the temporal coverage (start/end dates) for a dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_temporal(dsid)
-    return _json(data)
+# Single-field dataset metadata lookups. These used to be one @mcp.tool()
+# each (get_dataset_abstract, get_dataset_variables, ...) — ten near-
+# identical thin wrappers, each paying its own fixed tool-schema cost in
+# every session regardless of use. Consolidated into one tool with a `field`
+# selector, following the same validate-against-known-values pattern already
+# used by get_portal_metrics/get_dataset_metrics below. describe_dataset
+# remains the way to fetch several of these at once.
+DATASET_FIELDS = {
+    "abstract": client.get_abstract,
+    "variables": client.get_variables,
+    "temporal": client.get_temporal,
+    "spatial_coverage": client.get_spatial_coverage,
+    "publications": client.get_publications,
+    "contributors": client.get_contributors,
+    "data_formats": client.get_data_formats,
+    "volume": client.get_volume,
+    "related_datasets": client.get_related_datasets,
+    "documentation": client.get_documentation,
+}
 
 
 @mcp.tool()
-async def get_dataset_spatial_coverage(dsid: str) -> str:
-    """Return the spatial/geographic coverage for a dataset.
+async def get_dataset_field(dsid: str, field: str) -> str:
+    """Return one metadata field for a dataset.
+
+    Prefer describe_dataset when the user wants a general summary covering
+    several of these at once (abstract, temporal, spatial_coverage,
+    variables, data_formats, volume) — this tool is for pulling a single
+    field, including the fields describe_dataset doesn't cover
+    (publications, contributors, related_datasets, documentation).
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
+        field: One of: abstract, variables, temporal, spatial_coverage,
+               publications, contributors, data_formats, volume,
+               related_datasets, documentation
     """
-    data = await client.get_spatial_coverage(dsid)
-    return _json(data)
-
-
-@mcp.tool()
-async def get_dataset_publications(dsid: str) -> str:
-    """Return publications associated with a dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_publications(dsid)
-    return _json(data)
-
-
-@mcp.tool()
-async def get_dataset_contributors(dsid: str) -> str:
-    """Return the contributors (authors and organizations) for a dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_contributors(dsid)
-    return _json(data)
-
-
-@mcp.tool()
-async def get_dataset_data_formats(dsid: str) -> str:
-    """Return the available file formats for a dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_data_formats(dsid)
-    return _json(data)
-
-
-@mcp.tool()
-async def get_dataset_volume(dsid: str) -> str:
-    """Return the total data volume for a dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_volume(dsid)
-    return _json(data)
-
-
-@mcp.tool()
-async def get_related_datasets(dsid: str) -> str:
-    """Return datasets related to or derived from the given dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_related_datasets(dsid)
-    return _json(data)
-
-
-@mcp.tool()
-async def get_dataset_documentation(dsid: str) -> str:
-    """Return documentation links for a dataset.
-
-    Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
-    """
-    data = await client.get_documentation(dsid)
+    fn = DATASET_FIELDS.get(field)
+    if fn is None:
+        return f"Unknown field '{field}'. Valid options: {', '.join(DATASET_FIELDS)}"
+    data = await fn(dsid)
     return _json(data)
 
 
@@ -246,13 +183,12 @@ async def describe_dataset(dsid: str) -> str:
     """Return a combined overview of a dataset — abstract, temporal coverage,
     spatial coverage, variables, data formats, and volume — in a single call.
 
-    Prefer this over calling the individual get_dataset_* metadata tools one
-    by one when the user wants a general summary of a dataset. If one of the
-    underlying fields fails to load, it's returned as {"error": ...} rather
-    than failing the whole call.
+    Prefer this over calling get_dataset_field repeatedly when the user wants
+    a general summary of a dataset. If one of the underlying fields fails to
+    load, it's returned as {"error": ...} rather than failing the whole call.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
     """
     return _json(await _describe_dataset_data(dsid))
 
@@ -310,11 +246,54 @@ async def get_file_groups(dsid: str, gindex: str = "") -> str:
     whole file just to read a subset of it.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         gindex: Optional group index to fetch child groups
     """
     data = await client.get_file_groups(dsid, gindex or None)
     return _json(data)
+
+
+_FILE_ROW_CAP = 500
+
+
+def _cap_dataset_files(data: dict, cap: int = _FILE_ROW_CAP) -> dict:
+    """Truncate a get_dataset_files response to at most `cap` file rows total
+    across all groups. A shallow/unfiltered call can otherwise return
+    thousands of rows and blow out the response size — this keeps that case
+    bounded instead of relying on the caller to always pass filter_wfile/page.
+    Only trims row lists; group/column structure is left intact, and non-file
+    responses (subgroup summaries, error dicts) pass through unchanged."""
+    if not isinstance(data, dict):
+        return data
+    groups = data.get("groups")
+    if not isinstance(groups, list):
+        return data
+    remaining = cap
+    truncated = False
+    new_groups = []
+    for group in groups:
+        rows = group.get("rows") if isinstance(group, dict) else None
+        if not isinstance(rows, list):
+            new_groups.append(group)
+            continue
+        if len(rows) > remaining:
+            truncated = True
+            new_groups.append({**group, "rows": rows[:remaining]})
+            remaining = 0
+        else:
+            new_groups.append(group)
+            remaining -= len(rows)
+    if not truncated:
+        return data
+    return {
+        **data,
+        "groups": new_groups,
+        "_truncated": True,
+        "_truncated_note": (
+            f"File row count exceeded {cap}; response truncated. Narrow with "
+            "filter_wfile, descend to a deeper gindex, or page through with `page`."
+        ),
+    }
 
 
 @mcp.tool()
@@ -330,16 +309,18 @@ async def get_dataset_files(
     level deeper; gindex values are dataset-specific and can't be guessed.
 
     A shallow gindex on a large dataset can return a very large response
-    (thousands of files). Two ways to avoid that instead of drilling down
-    group by group: pass filter_wfile with a filename pattern (e.g. a date
-    like "20220808") to filter down to matching files, or page through a
-    known group's results with `page`. filter_wfile only filters actual file
-    rows, so it has no effect at a gindex that's still returning a subgroup
-    summary rather than files — if a first attempt comes back unfiltered,
-    descend one level (see get_file_groups) and retry there.
+    (thousands of files) — the file-row portion of the response is capped at
+    500 rows (look for "_truncated": true). Two ways to avoid hitting that
+    cap instead of drilling down group by group: pass filter_wfile with a
+    filename pattern (e.g. a date like "20220808") to filter down to matching
+    files, or page through a known group's results with `page`. filter_wfile
+    only filters actual file rows, so it has no effect at a gindex that's
+    still returning a subgroup summary rather than files — if a first attempt
+    comes back unfiltered, descend one level (see get_file_groups) and retry
+    there.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         gindex: Optional group index to filter files
         page: Page number to fetch (for a group with more files than fit on one page)
         filter_wfile: Filter files by name pattern, e.g. "20220808" to match a date
@@ -352,7 +333,7 @@ async def get_dataset_files(
         filter_wfile or None,
         fl or None,
     )
-    return _json(data)
+    return _json(_cap_dataset_files(data))
 
 
 def _flatten_file_rows(filelist_response) -> list[dict]:
@@ -408,7 +389,7 @@ async def find_dataset_files(
     start_gindex and retry, or raise the cap.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         name_pattern: Filename substring/pattern to match, e.g. "20220808" for a date
         start_gindex: Optional group index to start the search from, instead of the dataset root
         max_groups_visited: Safety cap on groups traversed before giving up (default 300)
@@ -484,7 +465,7 @@ async def get_filesearch_datatypes(dsid: str) -> str:
     datatypes it actually contains.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
     """
     data = await client.get_filesearch_datatypes(dsid)
     return _json(data)
@@ -506,7 +487,7 @@ async def get_filesearch_grid_filters(
     you already know you want.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         valid_datetime_min: Restrict to data valid on/after "YYYY-MM-DD HH:MM"
         valid_datetime_max: Restrict to data valid on/before "YYYY-MM-DD HH:MM"
         parameters: Restrict to specified parameter code(s)
@@ -534,7 +515,7 @@ async def get_filesearch_cyclone_fix_filters(
     datatype file search on a dataset.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         valid_datetime_min: Restrict to data valid on/after "YYYY-MM-DD HH:MM"
         valid_datetime_max: Restrict to data valid on/before "YYYY-MM-DD HH:MM"
     """
@@ -552,7 +533,7 @@ async def get_filesearch_sensor_filters(dsid: str, valid_date_min: str = "", val
     file search on a dataset.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         valid_date_min: Restrict to data valid on/after "YYYY-MM-DD"
         valid_date_max: Restrict to data valid on/before "YYYY-MM-DD"
     """
@@ -581,7 +562,7 @@ async def get_filesearch_grid_files(
     first to find valid parameter/product/grid/level codes for this dataset.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         parameters: Parameter code(s) to search for (required, at least one)
         valid_datetime_min: Restrict to data valid on/after "YYYY-MM-DD HH:MM"
         valid_datetime_max: Restrict to data valid on/before "YYYY-MM-DD HH:MM"
@@ -610,7 +591,7 @@ async def get_filesearch_cyclone_fix_files(
     with the returned result_id to fetch additional pages.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         valid_datetime_min: Restrict to data valid on/after "YYYY-MM-DD HH:MM"
         valid_datetime_max: Restrict to data valid on/before "YYYY-MM-DD HH:MM"
     """
@@ -629,7 +610,7 @@ async def get_filesearch_sensor_files(dsid: str, valid_date_min: str = "", valid
     with the returned result_id to fetch additional pages.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         valid_date_min: Restrict to data valid on/after "YYYY-MM-DD"
         valid_date_max: Restrict to data valid on/before "YYYY-MM-DD"
     """
@@ -649,7 +630,7 @@ async def get_filesearch_result_page(dsid: str, result_id: str, page_num: int) -
     num_pages and next_page).
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         result_id: The result_id from a previous filesearch files/results response
         page_num: Page number to retrieve
     """
@@ -667,7 +648,7 @@ async def get_data_access(dsid: str) -> str:
     """Return data access options for a dataset — download links, Globus URLs, access methods.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
     """
     data = await client.get_data_access(dsid)
     return _json(data)
@@ -700,7 +681,34 @@ async def get_data_access(dsid: str) -> str:
 #
 # This needs the `kerchunk` and `fastparquet` packages installed (parquet-
 # backed reference sets use fastparquet, not pyarrow, under the hood).
+#
+# Plain Zarr-store ARCO variables (type "zarr" rather than "reference") need
+# no variant picking — the client rewrites their URL host to route through
+# the OSDF director automatically (data.gdex.ucar.edu is NCAR-internal-only;
+# osdf-director.osg-htc.org/ncar/gdex/... is reachable from anywhere). Open
+# one directly with xr.open_dataset(url, engine="zarr").
 # ---------------------------------------------------------------------------
+
+
+_ARCO_VAR_CAP = 300
+
+
+def _cap_arco_variables(data, cap: int = _ARCO_VAR_CAP):
+    """Truncate an ARCO variables listing to at most `cap` rows. A dataset
+    with many variables (each often repeated once per kerchunk reference
+    variant) can otherwise return a response large enough to blow out
+    context; search_arco_variables narrows by name but isn't guaranteed to
+    stay small either. Passes through unchanged if `data` isn't a plain list
+    (e.g. an error dict)."""
+    if not isinstance(data, list) or len(data) <= cap:
+        return data
+    return {
+        "total": len(data),
+        "returned": cap,
+        "truncated": True,
+        "note": "Narrow with search_arco_variables if you haven't already.",
+        "variables": data[:cap],
+    }
 
 
 @mcp.tool()
@@ -718,7 +726,7 @@ async def has_arco(dsid: str) -> str:
     hand-building an fsspec reference filesystem.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
     """
     data = await client.has_arco(dsid)
     return _json(data)
@@ -728,36 +736,45 @@ async def has_arco(dsid: str) -> str:
 async def get_arco_variables(dsid: str) -> str:
     """Return the list of ARCO variables available for a dataset.
 
-    A variable is often listed multiple times, once per kerchunk reference
-    variant (plain, "-remote-https", "-remote-osdf", etc.). Always pick the
-    "-osdf" variant's URL — it's reachable from anywhere; the others' chunk
-    targets can be internal paths that only resolve on NCAR's network. Open
-    the chosen URL with xr.open_dataset(url, engine="kerchunk",
-    storage_options={"remote_protocol": "https", "lazy": True}) — that's
-    better behaved than hand-building an fsspec reference filesystem.
+    Each row's type (index 2) is either "zarr" or "reference" (kerchunk).
+    A "reference" variable is often listed multiple times, once per kerchunk
+    reference variant (plain, "-remote-https", "-remote-osdf", etc.) — always
+    pick the "-osdf" variant's URL; the others' chunk targets can be internal
+    paths that only resolve on NCAR's network. Open it with
+    xr.open_dataset(url, engine="kerchunk", storage_options={"remote_protocol":
+    "https", "lazy": True}) — that's better behaved than hand-building an
+    fsspec reference filesystem. A "zarr" row needs no variant picking — its
+    URL already routes through the OSDF director (rewritten automatically);
+    open it directly with xr.open_dataset(url, engine="zarr").
+
+    Results are capped at 300 rows (look for "truncated": true); narrow with
+    search_arco_variables if you hit the cap.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
     """
     data = await client.get_arco_variables(dsid)
-    return _json(data)
+    return _json(_cap_arco_variables(data))
 
 
 @mcp.tool()
 async def search_arco_variables(dsid: str, query: str) -> str:
     """Search ARCO variables by name for a dataset.
 
-    As with get_arco_variables, a match is often listed once per kerchunk
-    reference variant — always pick the "-osdf" variant's URL (reachable
+    As with get_arco_variables, a "reference" (kerchunk) match is often
+    listed once per variant — always pick the "-osdf" variant's URL (reachable
     from anywhere), and open it with xr.open_dataset(url, engine="kerchunk",
-    storage_options={"remote_protocol": "https", "lazy": True}).
+    storage_options={"remote_protocol": "https", "lazy": True}). A "zarr"
+    match needs no variant picking — its URL already routes through the OSDF
+    director (rewritten automatically); open it directly with
+    xr.open_dataset(url, engine="zarr").
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         query: Search text to match against variable names
     """
     data = await client.search_arco_variables(dsid, query)
-    return _json(data)
+    return _json(_cap_arco_variables(data))
 
 
 # ---------------------------------------------------------------------------
@@ -799,7 +816,7 @@ async def get_dataset_metrics(dsid: str, metric: str = "volume_year") -> str:
     """Return a per-dataset metric.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         metric: One of: users_month, users_year, volume_month, volume_year
     """
     if metric not in DATASET_METRICS:
@@ -863,7 +880,7 @@ async def get_control_file_template(dsid: str) -> str:
     """Return the control file template for building a subsetting request for a dataset.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
     """
     data = await client.get_control_file_template(dsid)
     return _json(data)
@@ -891,7 +908,7 @@ async def validate_subset_request(dsid: str, request_json: str) -> str:
     API call.
 
     Args:
-        dsid: Dataset ID in dNNNNNN format, e.g. d083002
+        dsid: Dataset ID (dNNNNNN), e.g. d083002
         request_json: JSON string of the subsetting request body to validate
     """
     try:
@@ -1101,8 +1118,8 @@ def prepare_subset_request(dsid: str, goal: str = "") -> str:
         f"1. Call get_control_file_template(dsid=\"{dsid}\") to see the fields this "
         "dataset's requests accept.\n"
         "2. Draft a request body (as a JSON object) covering the fields relevant to "
-        "the user's goal — check get_dataset_temporal/get_dataset_spatial_coverage/"
-        "get_dataset_variables first if you need to confirm valid ranges or names.\n"
+        "the user's goal — check get_dataset_field(field=\"temporal\"/\"spatial_coverage\"/"
+        "\"variables\") first if you need to confirm valid ranges or names.\n"
         f'3. Call validate_subset_request(dsid="{dsid}", request_json=<your draft>) and '
         "fix anything it flags before moving on.\n"
         "4. Confirm the request with the user (it may take a while to run and consume "
