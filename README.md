@@ -49,9 +49,10 @@ docker stop gdex-mcp && docker rm gdex-mcp
 
 ## Deployment
 
-A merged PR to `main` triggers the GitHub Actions workflow, which builds a
+A merged PR to `main` triggers the GitHub Actions workflow, which runs the
+test suite (`pip install -e ".[test]" && pytest`) and then builds a
 new Docker image and pushes it to Harbor
-(`hub.k8s.ucar.edu/riley_gdex_test/gdex-mcp`). The app is deployed to
+(`hub.k8s.ucar.edu/gdex_mcp/gdex-mcp`). The app is deployed to
 Kubernetes via the Helm chart in `app-chart/` — see CLAUDE.md's Deployment
 section for how this follows gdex-web-services' conventions.
 

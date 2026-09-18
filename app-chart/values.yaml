@@ -16,10 +16,9 @@ webapp:
     fqdn: mcp.gdex.ucar.edu
     secretName: incommon-cert-gdex-mcp
   container:
-    # "gdex_mcp" is a placeholder Harbor project name — create it (and a
-    # robot account for CI) before enabling the deploy workflow; rename
-    # here and in .github/workflows/deploy.yaml to match whatever project
-    # actually gets provisioned.
+    # Harbor project "gdex_mcp" — must exist (with a robot account for CI)
+    # before the deploy workflow can push. If the project is ever renamed,
+    # update it here and in .github/workflows/deploy.yaml.
     image: hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:latest
     port: 8080
     requests:

@@ -4,8 +4,10 @@ name: Deploy GDEX MCP Container
 # than gdex-web-portal's Docker-Hub-based one): Harbor registry, PR-closed
 # trigger, github-actions[bot] commit identity, run-id image tags.
 #
-# Requires repo secrets RILEY_HARBOR_USERNAME, RILEY_HARBOR_PASSWORD, and
-# ACTIONS_PUSH_KEY — set these on this repo before enabling the workflow.
+# Requires repo secrets HARBOR_USERNAME, HARBOR_PASSWORD, and ACTIONS_PUSH_KEY,
+# and an existing `gdex_mcp` project on hub.k8s.ucar.edu (with a robot account
+# for HARBOR_USERNAME/HARBOR_PASSWORD) — set these up before enabling the
+# workflow. The test suite must pass before any image is built.
 on:
   pull_request:
     types:
@@ -27,7 +29,24 @@ on:
         default: 'No comment provided'
 
 jobs:
+  test:
+    if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package with test dependencies
+        run: pip install ".[test]"
+      - name: Run tests
+        run: python -m pytest -q
+
   container-rebuild:
+    needs: test
     if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
