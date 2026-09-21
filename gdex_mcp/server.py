@@ -9,12 +9,40 @@ import time
 import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from gdex_mcp.client import GDEXAuthError, GDEXClient, GDEXError
 
 load_dotenv()
 
-mcp = FastMCP("gdex")
+
+
+def _transport_security() -> TransportSecuritySettings:
+    """DNS-rebinding protection settings for the streamable-http transport.
+
+    FastMCP only auto-allows localhost, so a deployed instance rejects its own
+    public hostname with `421 Invalid Host header` unless it's listed here.
+    GDEX_MCP_ALLOWED_HOSTS is a comma-separated list of extra hostnames (no
+    scheme/port), e.g. "gdex-mcp.k8s.ucar.edu"; localhost is always allowed.
+    """
+    extra = [
+        h.strip()
+        for h in os.environ.get("GDEX_MCP_ALLOWED_HOSTS", "").split(",")
+        if h.strip()
+    ]
+    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+    for h in extra:
+        hosts += [h, f"{h}:*"]
+        origins += [f"https://{h}", f"http://{h}"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
+mcp = FastMCP("gdex", transport_security=_transport_security())
 
 _base_url = os.environ.get("GDEX_BASE_URL", "https://gdex.ucar.edu")
 _token = os.environ.get("GDEX_TOKEN") or None
