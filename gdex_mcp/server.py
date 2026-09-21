@@ -715,8 +715,7 @@ async def get_data_access(dsid: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-_ARCO_VAR_CAP = 300
-
+_ARCO_VAR_CAP = 250
 
 def _cap_arco_variables(data, cap: int = _ARCO_VAR_CAP):
     """Truncate an ARCO variables listing to at most `cap` rows. A dataset
