@@ -1,0 +1,50 @@
+replicaCount: 1
+
+# Key stays `webapp:` for consistency with gdex-web-portal's and
+# gdex-web-services' charts, even though this app isn't a "webapp" per se —
+# matching the org's established chart convention rather than renaming it
+# per service.
+webapp:
+  name: gdex-mcp
+  group: gdex-mcp
+  path: /
+  tls:
+    # Public-facing, like gdex-web-portal's gdex.ucar.edu (drops the
+    # ".k8s" internal-service naming gdex-web-services uses, since this is
+    # meant to be reachable by MCP clients outside NCAR's network, not just
+    # internal tools).
+    fqdn: mcp.gdex.ucar.edu
+    secretName: incommon-cert-gdex-mcp
+  container:
+    # Harbor project "gdex_mcp" — must exist (with a robot account for CI)
+    # before the deploy workflow can push. If the project is ever renamed,
+    # update it here and in .github/workflows/deploy.yaml.
+    image: hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:latest
+    port: 8080
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+    # streamable-http requests stay open for the duration of one MCP tool
+    # call — submit_and_wait_for_request in particular can poll for up to
+    # its timeout_s (default 600s) inside a single request. Keep this at or
+    # above the longest timeout_s you expect callers to pass.
+    responseTimeout: 900
+  env:
+    gdexBaseUrl: https://gdex.ucar.edu
+  ingress:
+    # External (unlike gdex-web-services' nginx-internal): MCP clients
+    # connecting from outside NCAR's network — e.g. someone's own Claude
+    # Desktop — need to reach this directly.
+    ingressClassName: nginx-external
+
+# Deliberately no `volume:`/`objectStore:`/`backup:` blocks here, unlike
+# gdex-web-portal's and gdex-web-services' charts: gdex-mcp is stateless (no
+# DB, no NFS mount, nothing to back up) — every request builds its own
+# short-lived GDEXClient (see gdex_mcp/server.py's _authed_client()) and
+# holds no state between requests. It also carries no GDEX_TOKEN secret:
+# auth-required tools take the caller's own token from that request's
+# Authorization header instead of one shared credential, so there's no
+# per-deployment secret to provision at all.
