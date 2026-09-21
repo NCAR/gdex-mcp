@@ -62,6 +62,10 @@ spec:
           value: "0.0.0.0"
         - name: GDEX_MCP_PORT
           value: "{{ .Values.webapp.container.port }}"
+        # Without this the MCP SDK's DNS-rebinding protection rejects the
+        # public hostname with "421 Invalid Host header".
+        - name: GDEX_MCP_ALLOWED_HOSTS
+          value: {{ .Values.webapp.tls.fqdn | quote }}
         - name: GDEX_BASE_URL
           value: {{ .Values.webapp.env.gdexBaseUrl }}
         # No GDEX_TOKEN here — this deployment serves many callers, each

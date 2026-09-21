@@ -9,11 +9,7 @@ webapp:
   group: gdex-mcp
   path: /
   tls:
-    # Public-facing, like gdex-web-portal's gdex.ucar.edu (drops the
-    # ".k8s" internal-service naming gdex-web-services uses, since this is
-    # meant to be reachable by MCP clients outside NCAR's network, not just
-    # internal tools).
-    fqdn: mcp.gdex.ucar.edu
+    fqdn: gdex-mcp.k8s.ucar.edu
     secretName: incommon-cert-gdex-mcp
   container:
     # Harbor project "gdex_mcp" — must exist (with a robot account for CI)

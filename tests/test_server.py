@@ -153,3 +153,23 @@ def test_main_rejects_unknown_transport(monkeypatch):
     monkeypatch.setenv("GDEX_MCP_TRANSPORT", "carrier-pigeon")
     with pytest.raises(ValueError, match="carrier-pigeon"):
         server.main()
+
+
+def test_transport_security_allows_configured_host(monkeypatch):
+    from mcp.server.transport_security import TransportSecurityMiddleware
+
+    monkeypatch.setenv("GDEX_MCP_ALLOWED_HOSTS", "gdex-mcp.k8s.ucar.edu")
+    mw = TransportSecurityMiddleware(server._transport_security())
+    assert mw._validate_host("gdex-mcp.k8s.ucar.edu")
+    assert mw._validate_host("gdex-mcp.k8s.ucar.edu:443")
+    assert mw._validate_host("localhost:8080")
+    assert not mw._validate_host("evil.example.com")
+
+
+def test_transport_security_defaults_to_localhost_only(monkeypatch):
+    from mcp.server.transport_security import TransportSecurityMiddleware
+
+    monkeypatch.delenv("GDEX_MCP_ALLOWED_HOSTS", raising=False)
+    mw = TransportSecurityMiddleware(server._transport_security())
+    assert mw._validate_host("127.0.0.1:8080")
+    assert not mw._validate_host("gdex-mcp.k8s.ucar.edu")
