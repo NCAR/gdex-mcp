@@ -1,0 +1,16 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rpconroy/gdex-mcp",
+  "description": "MCP server for the GDEX (Geoscience Data Exchange) data portal: datasets, files, metrics, subsetting",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/NCAR/gdex-mcp",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://gdex-mcp.k8s.ucar.edu/mcp"
+    }
+  ]
+}

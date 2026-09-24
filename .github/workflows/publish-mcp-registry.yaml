@@ -1,0 +1,69 @@
+name: Publish to MCP Registry
+#
+# Publishes server.json to the official MCP Registry (registry.modelcontextprotocol.io)
+# so gdex-mcp is discoverable there. Distinct from deploy.yaml (which builds/pushes the
+# Harbor image on every merged PR): this only runs on an explicit version tag, since a
+# registry publish is a versioned release, not "whatever's on main right now."
+#
+# Published under io.github.rpconroy/gdex-mcp for now, not io.github.NCAR/gdex-mcp:
+# the registry's org-membership check kept 403ing even with public NCAR membership
+# (see modelcontextprotocol/registry issues #1537, #1649 — an org-admin-side OAuth
+# App restriction is the suspected cause). Because this repo is NCAR-owned, GitHub
+# Actions OIDC here always asserts repository_owner=NCAR, so it can't authenticate
+# as the personal rpconroy namespace either — hence PAT auth (MCP_GITHUB_TOKEN
+# secret, a GitHub PAT with read:org + read:user scopes) instead of `login
+# github-oidc`. Once NCAR access is sorted, republishing under io.github.NCAR/gdex-mcp
+# means a new registry entry (no rename support today) and switching this back to
+# `login github-oidc` with just the id-token: write permission.
+#
+# See server.json for the published metadata; it currently only advertises the
+# streamable-http remote (gdex-mcp.k8s.ucar.edu), since this package isn't published
+# to PyPI.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      run_reason:
+        description: 'Provide a reason or comment for this workflow'
+        required: false
+        type: string
+        default: 'No comment provided'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package with test dependencies
+        run: pip install ".[test]"
+      - name: Run tests
+        run: python -m pytest -q
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Set version in server.json from tag
+        if: github.event_name == 'push'
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          jq --arg v "$VERSION" '.version = $v' server.json > server.tmp && mv server.tmp server.json
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github --token ${{ secrets.MCP_GITHUB_TOKEN }}
+
+      - name: Publish server to MCP Registry
+        run: ./mcp-publisher publish
