@@ -15,7 +15,7 @@ webapp:
     # Harbor project "gdex_mcp" — must exist (with a robot account for CI)
     # before the deploy workflow can push. If the project is ever renamed,
     # update it here and in .github/workflows/deploy.yaml.
-    image: hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:v35659233608
+    image: hub.k8s.ucar.edu/gdex_mcp/gdex-mcp:v36051280333
     port: 8080
     requests:
       memory: 256Mi
