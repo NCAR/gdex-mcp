@@ -64,6 +64,23 @@ helm upgrade --install gdex-mcp ./app-chart -n <namespace>
 helm upgrade --install gdex-mcp ./app-chart -n <namespace> --set testName=<your-name>
 ```
 
+## MCP Registry
+
+`gdex-mcp` is published to the official [MCP Registry](https://registry.modelcontextprotocol.io)
+as `io.github.rpconroy/gdex-mcp` (see `server.json`), not `io.github.NCAR/gdex-mcp`.
+Publishing under the `NCAR` org namespace kept failing with a 403 even after
+making org membership public — a known, unresolved issue with the registry's
+org-membership check (see [modelcontextprotocol/registry#1537](https://github.com/modelcontextprotocol/registry/issues/1537)
+and [#1649](https://github.com/modelcontextprotocol/registry/issues/1649)),
+suspected to be an org-admin-side GitHub OAuth App access restriction rather
+than anything on our end. `.github/workflows/publish-mcp-registry.yaml`
+publishes new versions on `v*` tags; it uses PAT auth (`MCP_GITHUB_TOKEN`
+secret) instead of GitHub OIDC because this repo is NCAR-owned, so Actions
+OIDC always asserts `repository_owner: NCAR` and can't authenticate as the
+personal `rpconroy` namespace. Once NCAR org access is sorted out, moving to
+`io.github.NCAR/gdex-mcp` means publishing a new registry entry (the registry
+has no rename support) and switching the workflow back to `login github-oidc`.
+
 ## Documentation
 
 `CLAUDE.md` has the full picture: architecture, conventions to follow when
